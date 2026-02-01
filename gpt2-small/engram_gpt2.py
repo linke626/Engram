@@ -5,22 +5,22 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import List
 from transformers import AutoModelForCausalLM, AutoTokenizer, GPT2LMHeadModel
-# 复用你之前代码中的 Hashing 逻辑，为了简洁，这里假设你把之前的 NgramHashMapping 类保存在了 utils.py
-# 如果没有，请把之前代码里的 NgramHashMapping, CompressedTokenizer 等类粘贴到这个文件头部
+# 复用你之前代码中的 Hashing 逻辑
 from engram_train_v1 import NgramHashMapping, CompressedTokenizer 
 
 @dataclass
 class EngramConfig:
+    # 确保这里的路径是你本地真实存在的，或者改成 "gpt2"
     tokenizer_name_or_path: str = "/data2/home/wanghaoyi/models/gpt2_local"
-    engram_vocab_size: List[int] = field(default_factory=lambda: [200000, 200000]) # 加大词表存知识
+    engram_vocab_size: List[int] = field(default_factory=lambda: [200000, 200000]) 
     max_ngram_size: int = 3
-    n_embed_per_ngram: int = 768  # 与 GPT-2 hidden_size 对齐
-    n_head_per_ngram: int = 12    # 与 GPT-2 num_heads 对齐
-    layer_ids: List[int] = field(default_factory=lambda: [1, 5]) # 在第2层和第6层插入
+    n_embed_per_ngram: int = 768  
+    n_head_per_ngram: int = 12    
+    layer_ids: List[int] = field(default_factory=lambda: [1, 5]) 
     pad_id: int = 50256
     seed: int = 42
     kernel_size: int = 4
-    hidden_size: int = 768        # GPT-2 Small 默认参数
+    hidden_size: int = 768        
 
 engram_cfg = EngramConfig()
 
@@ -47,15 +47,14 @@ class EngramModule(nn.Module):
         
         self.mh_embed = MultiHeadEmbedding(vocab_sizes, embed_dim)
         
-        # 投影层：将 n-gram 特征投影回 GPT-2 的隐空间
+        # 投影层
         input_dim = (engram_cfg.max_ngram_size - 1) * engram_cfg.n_embed_per_ngram
         self.proj = nn.Linear(input_dim, engram_cfg.hidden_size)
-        self.gate = nn.Linear(engram_cfg.hidden_size * 2, engram_cfg.hidden_size) # 简单的门控
+        self.gate = nn.Linear(engram_cfg.hidden_size * 2, engram_cfg.hidden_size) 
         
     def forward(self, hidden_states, input_ids):
         # 1. Hash Lookup
         device = hidden_states.device
-        # 注意：生产环境应在 CPU 预处理 Hash，这里为了 Demo 在线计算
         input_ids_cpu = input_ids.detach().cpu().numpy()
         hashes = self.hash_mapping.hash(input_ids_cpu)[self.layer_id]
         hashes = torch.from_numpy(hashes).to(device)
@@ -64,40 +63,11 @@ class EngramModule(nn.Module):
         mem_embeds = self.mh_embed(hashes).flatten(start_dim=-2) # [B, L, D_mem]
         mem_out = self.proj(mem_embeds) # [B, L, D_gpt]
         
-        # 3. Simple Gating (融合记忆与当前上下文)
-        # 论文中使用了更复杂的 Attention 门控，这里用 Sigmoid 门控模拟
+        # 3. Simple Gating
         concat = torch.cat([hidden_states, mem_out], dim=-1)
         g = torch.sigmoid(self.gate(concat))
         
         return g * mem_out
-
-# ================= 包装器：将 Engram 注入 GPT-2 Block =================
-class EngramGPT2BlockWrapper(nn.Module):
-    def __init__(self, original_block, engram_module):
-        super().__init__()
-        self.block = original_block
-        self.engram = engram_module
-        
-    def forward(self, hidden_states, layer_past=None, attention_mask=None, head_mask=None, encoder_hidden_states=None, encoder_attention_mask=None, use_cache=False, output_attentions=False):
-        # 1. 正常执行 GPT-2 Layer
-        outputs = self.block(
-            hidden_states,
-            layer_past=layer_past,
-            attention_mask=attention_mask,
-            head_mask=head_mask,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_attention_mask,
-            use_cache=use_cache,
-            output_attentions=output_attentions,
-        )
-        hidden_states_out = outputs[0]
-        
-        # 2. 获取原始 Input IDs (这是一个 Hack，通常需要从外部传入，但为了简便我们假设能访问到 global input)
-        # 在训练 Loop 中，我们需要想办法把 input_ids 传进来。
-        # 为了不破坏 HF 接口，我们通常在 Model 级别处理，或者通过 global context (不推荐)。
-        # **最佳实践**：我们在 Model 级别修改，而不是 Block 级别。
-        # 这里为了演示，我们只返回 engram 模块，具体的 forward 在 Model 里写。
-        return outputs
 
 # ================= 最终模型：Hybrid Model =================
 class HybridEngramGPT2(nn.Module):
@@ -105,7 +75,20 @@ class HybridEngramGPT2(nn.Module):
         super().__init__()
         print("Loading local GPT-2...")
         self.backbone = AutoModelForCausalLM.from_pretrained(engram_cfg.tokenizer_name_or_path)
-        self.hash_mapping = NgramHashMapping(engram_cfg)
+        
+        # ----------------- 修正开始 -----------------
+        # 错误原因：NgramHashMapping 需要具体的参数，而不是一个 cfg 对象
+        self.hash_mapping = NgramHashMapping(
+            engram_vocab_size=engram_cfg.engram_vocab_size,
+            max_ngram_size=engram_cfg.max_ngram_size,
+            n_embed_per_ngram=engram_cfg.n_embed_per_ngram,
+            n_head_per_ngram=engram_cfg.n_head_per_ngram,
+            layer_ids=engram_cfg.layer_ids,
+            tokenizer_name_or_path=engram_cfg.tokenizer_name_or_path,
+            pad_id=engram_cfg.pad_id,
+            seed=engram_cfg.seed
+        )
+        # ----------------- 修正结束 -----------------
         
         # 初始化 Engram 模块字典
         self.engram_layers = nn.ModuleDict()
@@ -119,25 +102,19 @@ class HybridEngramGPT2(nn.Module):
         print("GPT-2 parameters frozen. Engram initialized.")
 
     def forward(self, input_ids, labels=None):
-        # 我们手动去跑 GPT-2 的 transformer 层，以便插入 Engram
-        # 1. Embedding
         inputs_embeds = self.backbone.transformer.wte(input_ids) + self.backbone.transformer.wpe(torch.arange(input_ids.size(1), device=input_ids.device))
         inputs_embeds = self.backbone.transformer.drop(inputs_embeds)
         
         hidden_states = inputs_embeds
         
-        # 2. Iterate Layers
         for i, block in enumerate(self.backbone.transformer.h):
-            # GPT-2 Block Forward
             outputs = block(hidden_states)
             hidden_states = outputs[0]
             
-            # 3. Engram Injection
             if str(i) in self.engram_layers:
                 mem_out = self.engram_layers[str(i)](hidden_states, input_ids)
-                hidden_states = hidden_states + mem_out # Residual connection
+                hidden_states = hidden_states + mem_out 
         
-        # 4. Norm & Head
         hidden_states = self.backbone.transformer.ln_f(hidden_states)
         logits = self.backbone.lm_head(hidden_states)
         
