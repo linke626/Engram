@@ -76,8 +76,6 @@ class HybridEngramGPT2(nn.Module):
         print("Loading local GPT-2...")
         self.backbone = AutoModelForCausalLM.from_pretrained(engram_cfg.tokenizer_name_or_path)
         
-        # ----------------- 修正开始 -----------------
-        # 错误原因：NgramHashMapping 需要具体的参数，而不是一个 cfg 对象
         self.hash_mapping = NgramHashMapping(
             engram_vocab_size=engram_cfg.engram_vocab_size,
             max_ngram_size=engram_cfg.max_ngram_size,
@@ -88,7 +86,6 @@ class HybridEngramGPT2(nn.Module):
             pad_id=engram_cfg.pad_id,
             seed=engram_cfg.seed
         )
-        # ----------------- 修正结束 -----------------
         
         # 初始化 Engram 模块字典
         self.engram_layers = nn.ModuleDict()

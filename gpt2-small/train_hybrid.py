@@ -4,12 +4,8 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
-# 从 transformers 中去掉 AdamW
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
-# 从 torch.optim 中导入 AdamW
 from torch.optim import AdamW
-
-# 导入刚才定义的模型
 from engram_gpt2 import HybridEngramGPT2, engram_cfg
 
 # 数据集类
